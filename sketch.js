@@ -1,26 +1,176 @@
 /*
-RDF Rabbit Demo v3.1 : Active Threat + 5 Rabbits + Reset
+RDF Rabbit Demo v4.1 : 資源枯渇→即時転移
 
-- 兎 5匹
-- 草 / 水
-- 能動的脅威 1体
-- 捕獲は「弾く」ではなく一定条件で死亡
-- 全滅したら自動で初期化
+変更点 (v4.0 → v4.1):
+──────────────────────────────────────────────────
+[4] 資源の枯渇→転移モデル
+    旧: nutrition/available が徐々に現地再生
+    新: 閾値以下に枯渇 → respawn() で別の場所に即時転移＋リセット
 
-使い方:
-- p5.js editor にそのまま貼り付け
+    効果:
+    - 水と草の重なりによる「永続安全地帯」が解消
+    - 資源が地形のように動き回り、探索圧が常に維持される
+    - アンカー退場条件(nutrition<0.08)が転移閾値(0.03)より先に発火するので
+      アンカー中の rabbit が転移に巻き込まれることはない
+
+    PARAMS 追加:
+    - GRASS_RESPAWN_THRESHOLD: 0.03
+    - WATER_RESPAWN_THRESHOLD: 0.03
+──────────────────────────────────────────────────
 */
 
+// ===== PARAMS（Fluctuation MOD の注入点） =====
+const PARAMS = {
+  // ワールド
+  NUM_RABBITS: 5,
+  NUM_GRASS:   12,
+  NUM_WATER:   2,
+
+  // 慣性係数  M：強いほど方向変化に抵抗
+  M_INERTIA: 0.935,
+
+  // ニーズ変化率
+  HUNGER_RATE:  0.0012,
+  THIRST_RATE:  0.0018,
+  FEAR_DECAY:   0.97,
+
+  // 疲労蓄積
+  SPRINT_EXCESS_START:   1.35,
+  SPRINT_FATIGUE_SCALE:  0.0032,
+  SLOW_FATIGUE_RECOVERY: 0.0018,
+  SLOW_THRESHOLD:        0.4,
+
+  // H_vec 散逸  α：低いほど熱が長く残る
+  H_DISSIPATION: 0.988,
+
+  // 非線形σ係数  σ = error² × this
+  H_ERROR_SCALE: 0.018,
+
+  // 疲労→H_vec.fatigue への直接寄与
+  H_FATIGUE_SCALE: 0.0015,
+
+  // 跳躍後熱残留率 ρ
+  H_JUMP_RESIDUAL: 0.35,
+
+  // ニーズ過剰→H_vec 成分への二乗蓄積閾値＆係数
+  THIRST_EXCESS_START:      0.48,
+  HUNGER_EXCESS_START:      0.54,
+  FATIGUE_EXCESS_START:     0.60,
+  FEAR_EXCESS_START:        0.25,
+  H_THIRST_EXCESS_SCALE:    0.12,
+  H_HUNGER_EXCESS_SCALE:    0.08,
+  H_FATIGUE_EXCESS_SCALE:   0.05,
+  H_FEAR_EXCESS_SCALE:      0.10,
+
+  // H_vec による勾配場増幅（最大ブースト率）
+  H_FOOD_AMP:   0.45,
+  H_WATER_AMP:  0.45,
+  H_COVER_AMP:  0.30,
+  H_DANGER_AMP: 0.35,
+
+  // 摂取によるH_vec 冷却
+  H_EAT_COOL:   1.5,
+  H_DRINK_COOL: 1.5,
+
+  // 恐怖曝露時の H_vec.fear 直接増加
+  H_FEAR_SOUND:  0.002,
+  H_FEAR_VISUAL: 0.006,
+
+  // 跳躍閾値
+  H_ANCHOR_THRESHOLD: 1.2,
+  FEAR_ANCHOR_BREAK:  0.42,
+
+  // 移動速度
+  MIN_SPEED:         1.8,
+  MAX_SPEED:         4.2,
+  FATIGUE_SPEED_MIN: 0.56,
+
+  // 勾配場の有効範囲
+  FOOD_RANGE:        240,
+  WATER_RANGE:       280,
+  COVER_GRASS_RANGE: 210,
+  COVER_WATER_RANGE: 220,
+
+  // 壁反発
+  WALL_MARGIN: 38,
+  WALL_FORCE:  0.02,
+
+  // ノイズ
+  NOISE_BASE:    0.05,
+  NOISE_H_SCALE: 0.03,
+
+  // アンカー入場条件
+  ANCHOR_MIN_OVERLAP:          0.72,
+  ANCHOR_GRASS_MAX_FEAR:       0.28,
+  ANCHOR_WATER_MAX_FEAR:       0.32,
+  ANCHOR_MIN_HUNGER:           0.45,
+  ANCHOR_MIN_FATIGUE:          0.42,
+  ANCHOR_MIN_THIRST:           0.38,
+  ANCHOR_MIN_GRASS_NUTRITION:  0.18,
+  ANCHOR_MIN_WATER_AVAILABLE:  0.15,
+
+  // アンカー退場条件
+  ANCHOR_GRASS_EXIT_HUNGER:  0.16,
+  ANCHOR_GRASS_EXIT_FATIGUE: 0.22,
+  ANCHOR_GRASS_EXIT_THIRST:  0.68,
+  ANCHOR_WATER_EXIT_THIRST:  0.22,
+
+  // 摂取レート（自由行動 / アンカー中）
+  INTAKE_FOOD_FREE:     0.010,
+  INTAKE_FOOD_ANCHORED: 0.012,
+  INTAKE_WATER_FREE:    0.012,
+  INTAKE_WATER_ANCHORED:0.015,
+  HUNGER_PER_FOOD:      0.9,
+  THIRST_PER_WATER:     1.3,
+
+  // 休息フラックス
+  RESTFLUX_GRASS_FREE:     0.004,
+  RESTFLUX_WATER_FREE:     0.003,
+  RESTFLUX_GRASS_ANCHORED: 0.006,
+  RESTFLUX_WATER_ANCHORED: 0.004,
+
+  // 摩擦（資源上でのvel減衰）
+  SLOW_FRICTION_GRASS: 0.16,
+  SLOW_FRICTION_WATER: 0.14,
+
+  // アンカー解放
+  RELEASE_VEL:         1.8,
+  COOLDOWN_ANCHOR:     70,
+  COOLDOWN_FEAR_BREAK: 35,
+
+  // ハンター
+  HUNTER_DETECT_RANGE: 230,
+  HUNTER_SOUND_RANGE:  260,
+  HUNTER_KILL_RANGE:   12,
+  HUNTER_CHASE_SPEED:  2.1,
+  HUNTER_SEARCH_SPEED: 1.5,
+  HUNTER_WANDER_SPEED: 1.0,
+  HUNTER_MEMORY:       85,
+
+  // バイアス表示閾値
+  FEAR_BIAS:    0.58,
+  THIRST_BIAS:  0.62,
+  FATIGUE_BIAS: 0.62,
+  HUNGER_BIAS:  0.62,
+
+  // 資源枯渇→転移の閾値
+  // アンカー退場条件(grass:0.08, water:0.07)より小さく設定
+  // → anchored rabbit が転移に巻き込まれない
+  GRASS_RESPAWN_THRESHOLD: 0.03,
+  WATER_RESPAWN_THRESHOLD: 0.03,
+
+  // リセット
+  RESET_FRAMES: 90,
+};
+
+// ===== グローバル変数 =====
 let rabbits = [];
 let grassPatches = [];
 let waterSources = [];
 let hunter;
 let resetTimer = 0;
 
-const NUM_RABBITS = 5;
-const NUM_GRASS = 12;
-const NUM_WATER = 2;
-
+// ===== セットアップ =====
 function setup() {
   createCanvas(960, 640);
   initWorld();
@@ -29,61 +179,49 @@ function setup() {
 function initWorld() {
   grassPatches = [];
   waterSources = [];
-  rabbits = [];
-  resetTimer = 0;
+  rabbits      = [];
+  resetTimer   = 0;
 
-  for (let i = 0; i < NUM_GRASS; i++) {
+  for (let i = 0; i < PARAMS.NUM_GRASS; i++) {
     grassPatches.push(new GrassPatch(random(70, width - 70), random(70, height - 70)));
   }
-
-  for (let i = 0; i < NUM_WATER; i++) {
+  for (let i = 0; i < PARAMS.NUM_WATER; i++) {
     waterSources.push(new WaterSource(random(120, width - 120), random(120, height - 120)));
   }
-
-  for (let i = 0; i < NUM_RABBITS; i++) {
+  for (let i = 0; i < PARAMS.NUM_RABBITS; i++) {
     rabbits.push(new Rabbit(random(width * 0.2, width * 0.8), random(height * 0.2, height * 0.8), i));
   }
-
   hunter = new ActiveThreat(random(width), random(height));
 }
 
+// ===== メインループ =====
 function draw() {
   background(18, 20, 24, 50);
   drawGrid();
 
-  for (const g of grassPatches) {
-    g.update();
-    g.show();
-  }
-
-  for (const w of waterSources) {
-    w.update();
-    w.show();
-  }
+  for (const g of grassPatches) { g.update(); g.show(); }
+  for (const w of waterSources) { w.update(); w.show(); }
 
   const aliveRabbits = rabbits.filter(r => r.alive);
 
   hunter.update(aliveRabbits);
   hunter.show();
 
-  for (const rabbit of rabbits) {
-    rabbit.update(hunter);
-    rabbit.show();
-  }
+  for (const rabbit of rabbits) { rabbit.update(hunter); rabbit.show(); }
 
   drawUI(aliveRabbits.length);
 
   if (aliveRabbits.length === 0) {
     resetTimer++;
     drawResetOverlay();
-    if (resetTimer > 90) initWorld();
+    if (resetTimer > PARAMS.RESET_FRAMES) initWorld();
   }
 }
 
 function drawGrid() {
   stroke(255, 255, 255, 10);
   strokeWeight(1);
-  for (let x = 0; x < width; x += 40) line(x, 0, x, height);
+  for (let x = 0; x < width;  x += 40) line(x, 0, x, height);
   for (let y = 0; y < height; y += 40) line(0, y, width, y);
 }
 
@@ -91,32 +229,44 @@ function drawUI(aliveCount) {
   noStroke();
   fill(255);
   textSize(14);
-  text('RDF Rabbit Demo v3.1 / 5 rabbits / active threat / death + reset', 20, 24);
-  text(`alive rabbits: ${aliveCount} / hunter mode: ${hunter.mode}`, 20, 44);
+  text('RDF Rabbit Demo v4.0 / H_vec + nonlinear σ + PARAMS', 20, 24);
+  text(`alive: ${aliveCount} / hunter: ${hunter.mode}`, 20, 44);
 
-  const focus = rabbits.find(r => r.alive) || rabbits[0];
-  const x = 20;
-  const y = height - 118;
+  // aliveCount はフレーム前半の snapshot なので
+  // update() 中にハンターが仕留めた場合は focus が undefined になりうる
+  const focus = rabbits.find(r => r.alive);
+  if (!focus) return;
+  const x = 20, y = height - 148;
   fill(0, 0, 0, 120);
-  rect(x - 10, y - 18, 520, 106, 8);
+  rect(x - 10, y - 18, 560, 136, 8);
 
   fill(255);
   textSize(13);
-  text(`focus rabbit: #${focus.id} ${focus.alive ? '' : '(dead)'}`, x, y);
-  text(`hunger: ${focus.hunger.toFixed(2)}`, x + 140, y);
-  text(`thirst: ${focus.thirst.toFixed(2)}`, x + 240, y);
-  text(`fatigue: ${focus.fatigue.toFixed(2)}`, x + 340, y);
-  text(`fear: ${focus.fear.toFixed(2)}`, x + 440, y);
+  text(`#${focus.id}`, x, y);
+  text(`hunger: ${focus.hunger.toFixed(2)}`, x + 60,  y);
+  text(`thirst: ${focus.thirst.toFixed(2)}`, x + 180, y);
+  text(`fatigue: ${focus.fatigue.toFixed(2)}`, x + 300, y);
+  text(`fear: ${focus.fear.toFixed(2)}`, x + 420, y);
 
   text(`mode: ${focus.label()}`, x, y + 22);
-  text(`speed: ${focus.vel.mag().toFixed(2)}`, x + 140, y + 22);
-  text(`hunter target: ${hunter.target ? '#' + hunter.target.id : 'none'}`, x + 240, y + 22);
-  text(`dist: ${hunter.target ? p5.Vector.dist(hunter.pos, hunter.target.pos).toFixed(1) : '-'}`, x + 410, y + 22);
+  text(`speed: ${focus.vel.mag().toFixed(2)}`, x + 200, y + 22);
+  text(`target: ${hunter.target ? '#' + hunter.target.id : 'none'}`, x + 300, y + 22);
+  text(`dist: ${hunter.target ? p5.Vector.dist(hunter.pos, hunter.target.pos).toFixed(1) : '-'}`, x + 420, y + 22);
 
-  text(`eat-flow: ${focus.intakeFood.toFixed(3)}`, x, y + 44);
-  text(`drink-flow: ${focus.intakeWater.toFixed(3)}`, x + 140, y + 44);
-  text(`rest-flow: ${focus.restFlux.toFixed(3)}`, x + 280, y + 44);
-  text(`anchor cd: ${focus.anchorCooldown}`, x + 420, y + 44);
+  // H_vec 表示（色付き）
+  const H  = focus.getH();
+  const hv = focus.H_vec;
+  fill(255); text(`H: ${H.toFixed(3)}`, x, y + 44);
+  fill(220, 185, 70);  text(`Hg(食): ${hv.hunger.toFixed(3)}`,  x + 80,  y + 44);
+  fill(80,  150, 255); text(`Ht(水): ${hv.thirst.toFixed(3)}`,  x + 210, y + 44);
+  fill(160, 100, 220); text(`Hf(疲): ${hv.fatigue.toFixed(3)}`, x + 340, y + 44);
+  fill(255, 80,  80);  text(`Hx(恐): ${hv.fear.toFixed(3)}`,    x + 460, y + 44);
+
+  fill(255);
+  text(`eat: ${focus.intakeFood.toFixed(3)}`,   x,       y + 66);
+  text(`drink: ${focus.intakeWater.toFixed(3)}`, x + 140, y + 66);
+  text(`rest: ${focus.restFlux.toFixed(3)}`,     x + 280, y + 66);
+  text(`cd: ${focus.anchorCooldown}`,             x + 420, y + 66);
 }
 
 function drawResetOverlay() {
@@ -125,30 +275,38 @@ function drawResetOverlay() {
   fill(255);
   textAlign(CENTER, CENTER);
   textSize(28);
-  text('All rabbits dead - resetting...', width / 2, height / 2);
+  text('All rabbits dead — resetting...', width / 2, height / 2);
   textAlign(LEFT, BASELINE);
 }
 
+// ===== GrassPatch =====
 class GrassPatch {
   constructor(x, y) {
-    this.pos = createVector(x, y);
-    this.radius = random(22, 36);
+    this.pos       = createVector(x, y);
+    this.radius    = random(22, 36);
     this.nutrition = random(0.55, 1.0);
-    this.cover = random(0.35, 1.0);
-    this.stopEase = random(0.45, 1.0);
-    this.growRate = random(0.0008, 0.0018);
+    this.cover     = random(0.35, 1.0);
+    this.stopEase  = random(0.45, 1.0);
+    // growRate 削除: 現地再生なし → 枯渇で転移
   }
 
-  update() {
-    this.nutrition = min(1.0, this.nutrition + this.growRate);
+  // 枯渇したら別の場所に転移・リセット
+  respawn() {
+    this.pos.set(random(70, width - 70), random(70, height - 70));
+    this.radius    = random(22, 36);
+    this.nutrition = random(0.65, 1.0);
+    this.cover     = random(0.35, 1.0);
+    this.stopEase  = random(0.45, 1.0);
   }
+
+  update() { /* 現地再生なし */ }
 
   consume(amount) {
     const eaten = min(this.nutrition, amount);
     this.nutrition -= eaten;
+    if (this.nutrition < PARAMS.GRASS_RESPAWN_THRESHOLD) this.respawn();
     return eaten;
   }
-
   show() {
     noStroke();
     const alpha = map(this.nutrition, 0, 1, 22, 140);
@@ -159,26 +317,34 @@ class GrassPatch {
   }
 }
 
+// ===== WaterSource =====
 class WaterSource {
   constructor(x, y) {
-    this.pos = createVector(x, y);
-    this.radius = random(28, 42);
+    this.pos       = createVector(x, y);
+    this.radius    = random(28, 42);
     this.hydration = random(0.85, 1.0);
     this.available = random(0.6, 1.0);
-    this.stopEase = random(0.4, 0.8);
-    this.recoverRate = random(0.0008, 0.0014);
+    this.stopEase  = random(0.4, 0.8);
+    // recoverRate 削除: 現地再生なし → 枯渇で転移
   }
 
-  update() {
-    this.available = min(1.0, this.available + this.recoverRate);
+  // 枯渇したら別の場所に転移・リセット
+  respawn() {
+    this.pos.set(random(120, width - 120), random(120, height - 120));
+    this.radius    = random(28, 42);
+    this.hydration = random(0.85, 1.0);
+    this.available = random(0.65, 1.0);
+    this.stopEase  = random(0.4, 0.8);
   }
+
+  update() { /* 現地再生なし */ }
 
   drink(amount) {
     const drank = min(this.available, amount);
     this.available -= drank;
+    if (this.available < PARAMS.WATER_RESPAWN_THRESHOLD) this.respawn();
     return drank;
   }
-
   show() {
     noStroke();
     const alpha = map(this.available, 0, 1, 40, 150);
@@ -189,19 +355,20 @@ class WaterSource {
   }
 }
 
+// ===== ActiveThreat =====
 class ActiveThreat {
   constructor(x, y) {
-    this.pos = createVector(x, y);
-    this.vel = p5.Vector.random2D().mult(0.9);
-    this.acc = createVector(0, 0);
-    this.radius = 18;
-    this.mode = 'wander';
-    this.detectRange = 230;
-    this.soundRange = 260;
-    this.killRange = 12;
-    this.memory = 0;
-    this.lastSeen = null;
-    this.target = null;
+    this.pos         = createVector(x, y);
+    this.vel         = p5.Vector.random2D().mult(0.9);
+    this.acc         = createVector(0, 0);
+    this.radius      = 18;
+    this.mode        = 'wander';
+    this.detectRange = PARAMS.HUNTER_DETECT_RANGE;
+    this.soundRange  = PARAMS.HUNTER_SOUND_RANGE;
+    this.killRange   = PARAMS.HUNTER_KILL_RANGE;
+    this.memory      = 0;
+    this.lastSeen    = null;
+    this.target      = null;
   }
 
   canSee(rabbit) {
@@ -215,42 +382,36 @@ class ActiveThreat {
   }
 
   chooseTarget(rabbits) {
-    let best = null;
-    let bestD = Infinity;
-    for (const rabbit of rabbits) {
-      if (!rabbit.alive) continue;
-      const d = p5.Vector.dist(this.pos, rabbit.pos);
-      if (this.canSee(rabbit) && d < bestD) {
-        best = rabbit;
-        bestD = d;
-      }
+    let best = null, bestD = Infinity;
+    for (const r of rabbits) {
+      if (!r.alive) continue;
+      const d = p5.Vector.dist(this.pos, r.pos);
+      if (this.canSee(r) && d < bestD) { best = r; bestD = d; }
     }
     return best;
   }
 
   update(rabbits) {
     this.acc.mult(0);
+    const visible = this.chooseTarget(rabbits);
 
-    const visibleTarget = this.chooseTarget(rabbits);
-
-    if (visibleTarget) {
-      this.target = visibleTarget;
-      this.mode = 'chase';
-      this.memory = 85;
-      this.lastSeen = visibleTarget.pos.copy();
+    if (visible) {
+      this.target   = visible;
+      this.mode     = 'chase';
+      this.memory   = PARAMS.HUNTER_MEMORY;
+      this.lastSeen = visible.pos.copy();
     } else if (this.memory > 0 && this.lastSeen) {
       this.mode = 'search';
       this.memory--;
       if (this.target && !this.target.alive) this.target = null;
     } else {
-      this.mode = 'wander';
+      this.mode     = 'wander';
       this.lastSeen = null;
-      this.target = null;
+      this.target   = null;
     }
 
-    if (this.mode === 'chase' && this.target && this.target.alive) {
-      const dir = p5.Vector.sub(this.target.pos, this.pos).normalize();
-      this.acc.add(dir.mult(0.18));
+    if (this.mode === 'chase' && this.target?.alive) {
+      this.acc.add(p5.Vector.sub(this.target.pos, this.pos).normalize().mult(0.18));
     } else if (this.mode === 'search' && this.lastSeen) {
       const dir = p5.Vector.sub(this.lastSeen, this.pos);
       if (dir.mag() > 5) this.acc.add(dir.normalize().mult(0.1));
@@ -260,18 +421,18 @@ class ActiveThreat {
     }
 
     this.vel.add(this.acc);
-    const maxSpeed = this.mode === 'chase' ? 2.5 : this.mode === 'search' ? 1.8 : 1.2;
-    this.vel.limit(maxSpeed);
+    this.vel.limit(
+      this.mode === 'chase'  ? PARAMS.HUNTER_CHASE_SPEED  :
+      this.mode === 'search' ? PARAMS.HUNTER_SEARCH_SPEED : PARAMS.HUNTER_WANDER_SPEED
+    );
     this.pos.add(this.vel);
     wrapPosition(this.pos);
 
-    if (this.target && this.target.alive) {
-      const d = p5.Vector.dist(this.pos, this.target.pos);
-      if (d < this.killRange) {
+    if (this.target?.alive) {
+      if (p5.Vector.dist(this.pos, this.target.pos) < this.killRange) {
         this.target.die();
         this.mode = 'wander';
-        this.target = null;
-        this.lastSeen = null;
+        this.target = this.lastSeen = null;
         this.memory = 0;
       }
     }
@@ -281,7 +442,6 @@ class ActiveThreat {
     noFill();
     stroke(255, 70, 70, this.mode === 'chase' ? 130 : 70);
     circle(this.pos.x, this.pos.y, this.radius * 6.8);
-
     push();
     translate(this.pos.x, this.pos.y);
     noStroke();
@@ -292,40 +452,58 @@ class ActiveThreat {
   }
 }
 
+// ===== Rabbit =====
 class Rabbit {
   constructor(x, y, id) {
-    this.id = id;
+    this.id    = id;
     this.alive = true;
-    this.pos = createVector(x, y);
-    this.vel = p5.Vector.random2D().mult(0.8);
-    this.acc = createVector(0, 0);
+    this.pos   = createVector(x, y);
+    this.vel   = p5.Vector.random2D().mult(0.8);
+    this.acc   = createVector(0, 0);
 
-    this.M = 0.935;
-    this.H = 0;
+    // 整合慣性（スカラー近似）
+    this.M = PARAMS.M_INERTIA;
 
-    this.hunger = random(0.2, 0.35);
-    this.thirst = random(0.18, 0.32);
+    // H_vec：4次元熱ベクトル
+    // hunger:空腹熱 / thirst:口渇熱 / fatigue:疲労熱 / fear:恐怖熱
+    this.H_vec = { hunger: 0, thirst: 0, fatigue: 0, fear: 0 };
+
+    this.hunger  = random(0.2, 0.35);
+    this.thirst  = random(0.18, 0.32);
     this.fatigue = random(0.08, 0.16);
-    this.fear = random(0.04, 0.1);
+    this.fear    = random(0.04, 0.1);
 
-    this.noiseScale = 0.05;
-
-    this.intakeFood = 0;
+    this.noiseScale  = PARAMS.NOISE_BASE;
+    this.intakeFood  = 0;
     this.intakeWater = 0;
-    this.restFlux = 0;
+    this.restFlux    = 0;
 
-    this.isAnchored = false;
-    this.anchorType = null;
-    this.anchorTarget = null;
+    this.isAnchored    = false;
+    this.anchorType    = null;
+    this.anchorTarget  = null;
     this.anchorCooldown = 0;
 
     this.lastForces = {
-      food: createVector(0, 0),
-      water: createVector(0, 0),
-      cover: createVector(0, 0),
+      food:   createVector(0, 0),
+      water:  createVector(0, 0),
+      cover:  createVector(0, 0),
       danger: createVector(0, 0),
-      cost: createVector(0, 0),
+      cost:   createVector(0, 0),
     };
+  }
+
+  // ||H_vec|| = スカラーH（閾値判定・リング半径に使用）
+  getH() {
+    const v = this.H_vec;
+    return sqrt(v.hunger**2 + v.thirst**2 + v.fatigue**2 + v.fear**2);
+  }
+
+  // H_vec 全成分に一様係数を適用（散逸・跳躍後残留）
+  _scaleH(factor) {
+    this.H_vec.hunger  *= factor;
+    this.H_vec.thirst  *= factor;
+    this.H_vec.fatigue *= factor;
+    this.H_vec.fear    *= factor;
   }
 
   die() {
@@ -337,12 +515,12 @@ class Rabbit {
 
   label() {
     if (!this.alive) return 'dead';
-    if (this.isAnchored && this.anchorType === 'grass') return 'anchored-grass';
-    if (this.isAnchored && this.anchorType === 'water') return 'anchored-water';
-    if (this.fear > 0.58) return 'escape-bias';
-    if (this.thirst > 0.62) return 'water-bias';
-    if (this.fatigue > 0.62) return 'rest-bias';
-    if (this.hunger > 0.62) return 'food-bias';
+    if (this.isAnchored && this.anchorType === 'grass')  return 'anchored-grass';
+    if (this.isAnchored && this.anchorType === 'water')  return 'anchored-water';
+    if (this.fear    > PARAMS.FEAR_BIAS)    return 'escape-bias';
+    if (this.thirst  > PARAMS.THIRST_BIAS)  return 'water-bias';
+    if (this.fatigue > PARAMS.FATIGUE_BIAS) return 'rest-bias';
+    if (this.hunger  > PARAMS.HUNGER_BIAS)  return 'food-bias';
     return 'mixed-flow';
   }
 
@@ -350,9 +528,9 @@ class Rabbit {
     if (!this.alive) return;
 
     this.acc.mult(0);
-    this.intakeFood = 0;
+    this.intakeFood  = 0;
     this.intakeWater = 0;
-    this.restFlux = 0;
+    this.restFlux    = 0;
 
     if (this.anchorCooldown > 0) this.anchorCooldown--;
 
@@ -361,7 +539,7 @@ class Rabbit {
     if (this.isAnchored) {
       this.senseDangerOnly(hunter);
       this.applyAnchoredFlows();
-      if (this.fear > 0.42) this.clearAnchor(35);
+      if (this.fear > PARAMS.FEAR_ANCHOR_BREAK) this.clearAnchor(PARAMS.COOLDOWN_FEAR_BREAK);
       return;
     }
 
@@ -377,15 +555,31 @@ class Rabbit {
     total.add(field.cost);
     total.add(field.danger);
 
+    // 誤差 E(t) = F(t) - M·V(t)
     const error = p5.Vector.sub(total, inertialFlow).mag();
-    this.H += error * 0.012 + this.fatigue * 0.0015;
-    this.H *= 0.988;
 
-    total.add(p5.Vector.random2D().mult(this.noiseScale + this.H * 0.03));
+    // 非線形熱生成 σ = error² × H_ERROR_SCALE
+    // → 現在の need 比で H_vec 各成分に分配
+    const sigma   = error * error * PARAMS.H_ERROR_SCALE;
+    const needSum = this.hunger + this.thirst + this.fatigue + this.fear + 0.001;
+    this.H_vec.hunger  += sigma * (this.hunger  / needSum);
+    this.H_vec.thirst  += sigma * (this.thirst  / needSum);
+    this.H_vec.fatigue += sigma * (this.fatigue / needSum);
+    this.H_vec.fear    += sigma * (this.fear    / needSum);
+
+    // 疲労の直接寄与（疲労熱成分へ）
+    this.H_vec.fatigue += this.fatigue * PARAMS.H_FATIGUE_SCALE;
+
+    // H_vec 散逸  dH/dt の -αH 項
+    this._scaleH(PARAMS.H_DISSIPATION);
+
+    const H = this.getH();
+
+    // ξ：H_vec の大きさに比例してノイズ増加
+    total.add(p5.Vector.random2D().mult(this.noiseScale + H * PARAMS.NOISE_H_SCALE));
 
     this.vel.add(total);
     this.vel.limit(this.computeMaxSpeed());
-
     this.pos.add(this.vel);
     wrapPosition(this.pos);
 
@@ -394,24 +588,28 @@ class Rabbit {
   }
 
   updateNeeds() {
-    this.hunger = constrain(this.hunger + 0.0012, 0, 1);
-    this.thirst = constrain(this.thirst + 0.0018, 0, 1);
-    this.fear *= 0.97;
+    this.hunger = constrain(this.hunger + PARAMS.HUNGER_RATE, 0, 1);
+    this.thirst = constrain(this.thirst + PARAMS.THIRST_RATE, 0, 1);
+    this.fear  *= PARAMS.FEAR_DECAY;
 
-    // 未解消needは二乗でHへ蓄積する
-    const thirstExcess = max(0, this.thirst - 0.48);
-    const hungerExcess = max(0, this.hunger - 0.54);
-    const fatigueExcess = max(0, this.fatigue - 0.60);
-    this.H += thirstExcess * thirstExcess * 0.12;
-    this.H += hungerExcess * hungerExcess * 0.08;
-    this.H += fatigueExcess * fatigueExcess * 0.05;
+    // 過剰ニーズ → 対応する H_vec 成分に二乗蓄積
+    const thirstEx  = max(0, this.thirst  - PARAMS.THIRST_EXCESS_START);
+    const hungerEx  = max(0, this.hunger  - PARAMS.HUNGER_EXCESS_START);
+    const fatigueEx = max(0, this.fatigue - PARAMS.FATIGUE_EXCESS_START);
+    const fearEx    = max(0, this.fear    - PARAMS.FEAR_EXCESS_START);
+    this.H_vec.thirst  += thirstEx  ** 2 * PARAMS.H_THIRST_EXCESS_SCALE;
+    this.H_vec.hunger  += hungerEx  ** 2 * PARAMS.H_HUNGER_EXCESS_SCALE;
+    this.H_vec.fatigue += fatigueEx ** 2 * PARAMS.H_FATIGUE_EXCESS_SCALE;
+    this.H_vec.fear    += fearEx    ** 2 * PARAMS.H_FEAR_EXCESS_SCALE;
 
-    const speed = this.vel.mag();
-    const sprintExcess = max(0, speed - 1.35);
-    this.fatigue = constrain(this.fatigue + sprintExcess * sprintExcess * 0.0032, 0, 1);
+    const speed        = this.vel.mag();
+    const sprintExcess = max(0, speed - PARAMS.SPRINT_EXCESS_START);
+    this.fatigue = constrain(
+      this.fatigue + sprintExcess ** 2 * PARAMS.SPRINT_FATIGUE_SCALE, 0, 1
+    );
 
-    if (!this.isAnchored && speed < 0.4) {
-      this.fatigue = max(0, this.fatigue - 0.0018);
+    if (!this.isAnchored && speed < PARAMS.SLOW_THRESHOLD) {
+      this.fatigue = max(0, this.fatigue - PARAMS.SLOW_FATIGUE_RECOVERY);
     }
   }
 
@@ -419,111 +617,117 @@ class Rabbit {
     const d = max(p5.Vector.dist(this.pos, hunter.pos), 1);
     if (d < hunter.soundRange) {
       this.fear = min(1, this.fear + 0.0025);
+      this.H_vec.fear = min(3, this.H_vec.fear + PARAMS.H_FEAR_SOUND);
     }
     if (hunter.canSee(this) && d < hunter.detectRange) {
       this.fear = min(1, this.fear + 0.012);
+      this.H_vec.fear = min(3, this.H_vec.fear + PARAMS.H_FEAR_VISUAL);
     }
   }
 
   buildGradientField(hunter) {
-    let F_food = createVector(0, 0);
-    let F_water = createVector(0, 0);
-    let F_cover = createVector(0, 0);
+    let F_food   = createVector(0, 0);
+    let F_water  = createVector(0, 0);
+    let F_cover  = createVector(0, 0);
     let F_danger = createVector(0, 0);
-    let F_cost = createVector(0, 0);
+    let F_cost   = createVector(0, 0);
 
     const thirstUrgency = max(0, this.thirst - 0.45) * 1.8;
 
+    // H_vec 方向ブースト係数
+    // 「空腹熱が高い兎は食物引力がより強く見える」を実装
+    const H       = this.getH() + 0.001;
+    const foodAmp   = 1 + PARAMS.H_FOOD_AMP   * (this.H_vec.hunger  / H);
+    const waterAmp  = 1 + PARAMS.H_WATER_AMP  * (this.H_vec.thirst  / H);
+    const coverAmp  = 1 + PARAMS.H_COVER_AMP  * (this.H_vec.fatigue / H);
+    const dangerAmp = 1 + PARAMS.H_DANGER_AMP * (this.H_vec.fear    / H);
+
     for (const g of grassPatches) {
-      const to = p5.Vector.sub(g.pos, this.pos);
+      const to   = p5.Vector.sub(g.pos, this.pos);
       const dRaw = to.mag();
       const dEff = max(dRaw, g.radius * 0.7);
-      const dir = to.copy().normalize();
+      const dir  = to.copy().normalize();
 
-      const foodPull = this.hunger * g.nutrition * (1.0 - min(0.55, thirstUrgency * 0.28)) / dEff;
+      const foodPull  = this.hunger * g.nutrition * (1.0 - min(0.55, thirstUrgency * 0.28)) / dEff;
       const coverPull = (this.fear * 1.6) * g.cover / dEff;
-      const restPull = this.fatigue * g.stopEase / dEff;
+      const restPull  = this.fatigue * g.stopEase / dEff;
 
-      if (dRaw < 240) F_food.add(p5.Vector.mult(dir, foodPull));
-      if (dRaw < 210) F_cover.add(p5.Vector.mult(dir, coverPull + restPull));
+      if (dRaw < PARAMS.FOOD_RANGE)        F_food.add(p5.Vector.mult(dir, foodPull));
+      if (dRaw < PARAMS.COVER_GRASS_RANGE) F_cover.add(p5.Vector.mult(dir, coverPull + restPull));
     }
 
     for (const w of waterSources) {
-      const to = p5.Vector.sub(w.pos, this.pos);
+      const to   = p5.Vector.sub(w.pos, this.pos);
       const dRaw = to.mag();
       const dEff = max(dRaw, w.radius * 0.7);
-      const dir = to.copy().normalize();
+      const dir  = to.copy().normalize();
 
       const waterPull = this.thirst * w.hydration * w.available * 3.2 / dEff;
-      const restPull = this.fatigue * w.stopEase * 0.4 / dEff;
+      const restPull  = this.fatigue * w.stopEase * 0.4 / dEff;
 
-      if (dRaw < 280) F_water.add(p5.Vector.mult(dir, waterPull));
-      if (dRaw < 220) F_cover.add(p5.Vector.mult(dir, restPull));
+      if (dRaw < PARAMS.WATER_RANGE)        F_water.add(p5.Vector.mult(dir, waterPull));
+      if (dRaw < PARAMS.COVER_WATER_RANGE)  F_cover.add(p5.Vector.mult(dir, restPull));
     }
 
-    const d = max(p5.Vector.dist(this.pos, hunter.pos), 1);
+    // ブースト適用（H_vec による勾配場の方向的増幅）
+    F_food.mult(foodAmp);
+    F_water.mult(waterAmp);
+    F_cover.mult(coverAmp);
+
+    const d    = max(p5.Vector.dist(this.pos, hunter.pos), 1);
     const away = p5.Vector.sub(this.pos, hunter.pos).normalize();
 
     if (d < hunter.soundRange) {
       const soundPush = (0.15 + this.fear) * 0.8 / d;
       F_danger.add(p5.Vector.mult(away, soundPush));
       this.fear = min(1, this.fear + 0.0018);
+      this.H_vec.fear = min(3, this.H_vec.fear + PARAMS.H_FEAR_SOUND);
     }
-
     if (hunter.canSee(this) && d < hunter.detectRange) {
       const visualPush = (0.35 + this.fear) * 2.8 / d;
       F_danger.add(p5.Vector.mult(away, visualPush));
       this.fear = min(1, this.fear + 0.0075);
+      this.H_vec.fear = min(3, this.H_vec.fear + PARAMS.H_FEAR_VISUAL);
     }
+    F_danger.mult(dangerAmp);
 
-    const wallMargin = 38;
-    if (this.pos.x < wallMargin) F_cost.add(createVector(0.02, 0));
-    if (this.pos.x > width - wallMargin) F_cost.add(createVector(-0.02, 0));
-    if (this.pos.y < wallMargin) F_cost.add(createVector(0, 0.02));
-    if (this.pos.y > height - wallMargin) F_cost.add(createVector(0, -0.02));
+    if (this.pos.x < PARAMS.WALL_MARGIN)           F_cost.add(createVector( PARAMS.WALL_FORCE,  0));
+    if (this.pos.x > width  - PARAMS.WALL_MARGIN)  F_cost.add(createVector(-PARAMS.WALL_FORCE,  0));
+    if (this.pos.y < PARAMS.WALL_MARGIN)           F_cost.add(createVector( 0,  PARAMS.WALL_FORCE));
+    if (this.pos.y > height - PARAMS.WALL_MARGIN)  F_cost.add(createVector( 0, -PARAMS.WALL_FORCE));
 
-    return {
-      food: F_food,
-      water: F_water,
-      cover: F_cover,
-      danger: F_danger,
-      cost: F_cost,
-    };
+    return { food: F_food, water: F_water, cover: F_cover, danger: F_danger, cost: F_cost };
   }
 
   computeMaxSpeed() {
-    const fearBoost = map(this.fear, 0, 1, 1.4, 4.0);
-    const fatiguePenalty = map(this.fatigue, 0, 1, 1.0, 0.56);
+    const fearBoost      = map(this.fear, 0, 1, PARAMS.MIN_SPEED, PARAMS.MAX_SPEED);
+    const fatiguePenalty = map(this.fatigue, 0, 1, 1.0, PARAMS.FATIGUE_SPEED_MIN);
     return fearBoost * fatiguePenalty;
   }
 
   resolveLocalInteractions() {
     for (const g of grassPatches) {
-      const d = p5.Vector.dist(this.pos, g.pos);
+      const d       = p5.Vector.dist(this.pos, g.pos);
       const overlap = max(0, 1 - d / (g.radius * 0.95));
       const calmness = (1 - this.fear) * max(0, 1 - this.vel.mag() / 1.25);
-      const intake = overlap * calmness;
-
+      const intake  = overlap * calmness;
       if (intake > 0) {
-        this.intakeFood = max(this.intakeFood, intake * g.nutrition * 0.010);
-        this.restFlux = max(this.restFlux, intake * g.stopEase * 0.004);
-        this.vel.mult(1.0 - overlap * 0.16);
+        this.intakeFood = max(this.intakeFood, intake * g.nutrition * PARAMS.INTAKE_FOOD_FREE);
+        this.restFlux   = max(this.restFlux,  intake * g.stopEase  * PARAMS.RESTFLUX_GRASS_FREE);
+        this.vel.mult(1.0 - overlap * PARAMS.SLOW_FRICTION_GRASS);
       }
     }
-
     for (const w of waterSources) {
-      const d = p5.Vector.dist(this.pos, w.pos);
+      const d       = p5.Vector.dist(this.pos, w.pos);
       const overlap = max(0, 1 - d / (w.radius * 0.95));
       const calmness = (1 - this.fear) * max(0, 1 - this.vel.mag() / 1.35);
-      const intake = overlap * calmness;
-
+      const intake  = overlap * calmness;
       if (intake > 0) {
-        this.intakeWater = max(this.intakeWater, intake * w.hydration * w.available * 0.012);
-        this.restFlux = max(this.restFlux, intake * w.stopEase * 0.003);
-        this.vel.mult(1.0 - overlap * 0.14);
+        this.intakeWater = max(this.intakeWater, intake * w.hydration * w.available * PARAMS.INTAKE_WATER_FREE);
+        this.restFlux    = max(this.restFlux,   intake * w.stopEase  * PARAMS.RESTFLUX_WATER_FREE);
+        this.vel.mult(1.0 - overlap * PARAMS.SLOW_FRICTION_WATER);
       }
     }
-
     this.applyIntakeFlows();
   }
 
@@ -533,28 +737,27 @@ class Rabbit {
       for (const g of grassPatches) {
         const d = p5.Vector.dist(this.pos, g.pos);
         if (d < g.radius * 0.95 && remaining > 0) {
-          const eaten = g.consume(min(remaining, 0.010));
-          this.hunger = max(0, this.hunger - eaten * 0.9);
+          const eaten = g.consume(min(remaining, PARAMS.INTAKE_FOOD_FREE));
+          this.hunger   = max(0, this.hunger - eaten * PARAMS.HUNGER_PER_FOOD);
+          this.H_vec.hunger = max(0, this.H_vec.hunger - eaten * PARAMS.H_EAT_COOL);
           remaining -= eaten;
         }
       }
     }
-
     if (this.intakeWater > 0) {
       let remaining = this.intakeWater;
       for (const w of waterSources) {
         const d = p5.Vector.dist(this.pos, w.pos);
         if (d < w.radius * 0.95 && remaining > 0) {
-          const drank = w.drink(min(remaining, 0.012));
-          this.thirst = max(0, this.thirst - drank * 1.3);
+          const drank = w.drink(min(remaining, PARAMS.INTAKE_WATER_FREE));
+          this.thirst  = max(0, this.thirst - drank * PARAMS.THIRST_PER_WATER);
+          this.H_vec.thirst = max(0, this.H_vec.thirst - drank * PARAMS.H_DRINK_COOL);
           remaining -= drank;
         }
       }
     }
-
     if (this.restFlux > 0) {
       this.fatigue = max(0, this.fatigue - this.restFlux);
-      // アンカー中はHを減衰させない
     }
   }
 
@@ -562,92 +765,97 @@ class Rabbit {
     if (this.anchorCooldown > 0 || this.isAnchored || !this.alive) return false;
 
     for (const g of grassPatches) {
-      const d = p5.Vector.dist(this.pos, g.pos);
+      const d       = p5.Vector.dist(this.pos, g.pos);
       const overlap = max(0, 1 - d / (g.radius * 0.95));
       if (
-        overlap > 0.72 &&
-        this.fear < 0.28 &&
-        (this.hunger > 0.45 || this.fatigue > 0.42) &&
-        g.nutrition > 0.18
+        overlap > PARAMS.ANCHOR_MIN_OVERLAP &&
+        this.fear < PARAMS.ANCHOR_GRASS_MAX_FEAR &&
+        (this.hunger > PARAMS.ANCHOR_MIN_HUNGER || this.fatigue > PARAMS.ANCHOR_MIN_FATIGUE) &&
+        g.nutrition > PARAMS.ANCHOR_MIN_GRASS_NUTRITION
       ) {
-        this.isAnchored = true;
-        this.anchorType = 'grass';
+        this.isAnchored   = true;
+        this.anchorType   = 'grass';
         this.anchorTarget = g;
         return true;
       }
     }
-
     for (const w of waterSources) {
-      const d = p5.Vector.dist(this.pos, w.pos);
+      const d       = p5.Vector.dist(this.pos, w.pos);
       const overlap = max(0, 1 - d / (w.radius * 0.95));
       if (
-        overlap > 0.72 &&
-        this.fear < 0.32 &&
-        this.thirst > 0.38 &&
-        w.available > 0.15
+        overlap > PARAMS.ANCHOR_MIN_OVERLAP &&
+        this.fear < PARAMS.ANCHOR_WATER_MAX_FEAR &&
+        this.thirst > PARAMS.ANCHOR_MIN_THIRST &&
+        w.available > PARAMS.ANCHOR_MIN_WATER_AVAILABLE
       ) {
-        this.isAnchored = true;
-        this.anchorType = 'water';
+        this.isAnchored   = true;
+        this.anchorType   = 'water';
         this.anchorTarget = w;
         return true;
       }
     }
-
     return false;
   }
 
   applyAnchoredFlows() {
     if (!this.alive) return;
-
     this.vel.set(0, 0);
     this.acc.set(0, 0);
-    this.intakeFood = 0;
+    this.intakeFood  = 0;
     this.intakeWater = 0;
-    this.restFlux = 0;
+    this.restFlux    = 0;
+    if (!this.anchorTarget) { this.clearAnchor(10); return; }
 
-    if (!this.anchorTarget) {
-      this.clearAnchor(10);
-      return;
-    }
+    const H = this.getH();
 
     if (this.anchorType === 'grass') {
-      const g = this.anchorTarget;
-      const d = p5.Vector.dist(this.pos, g.pos);
+      const g       = this.anchorTarget;
+      const d       = p5.Vector.dist(this.pos, g.pos);
       const overlap = max(0, 1 - d / (g.radius * 0.95));
-      const calmness = 1 - this.fear;
-      const intake = overlap * calmness;
+      const intake  = overlap * (1 - this.fear);
 
-      this.intakeFood = intake * g.nutrition * 0.012;
-      this.restFlux = intake * g.stopEase * 0.006;
+      this.intakeFood = intake * g.nutrition * PARAMS.INTAKE_FOOD_ANCHORED;
+      this.restFlux   = intake * g.stopEase  * PARAMS.RESTFLUX_GRASS_ANCHORED;
 
-      const eaten = g.consume(min(this.intakeFood, 0.012));
-      this.hunger = max(0, this.hunger - eaten * 0.9);
-      this.fatigue = max(0, this.fatigue - this.restFlux);
-      // アンカー中はHを減衰させない
+      const eaten = g.consume(min(this.intakeFood, PARAMS.INTAKE_FOOD_ANCHORED));
+      this.hunger   = max(0, this.hunger - eaten * PARAMS.HUNGER_PER_FOOD);
+      this.H_vec.hunger = max(0, this.H_vec.hunger - eaten * PARAMS.H_EAT_COOL);
+      this.fatigue  = max(0, this.fatigue - this.restFlux);
 
-      if (this.fear > 0.42 || g.nutrition < 0.08 || this.thirst > 0.68 || this.hunger < 0.16 || this.fatigue < 0.22 || this.H > 1.2) {
-        this.releaseFromPatch(g, 70);
+      if (
+        this.fear > PARAMS.FEAR_ANCHOR_BREAK ||
+        g.nutrition < 0.08 ||
+        this.thirst  > PARAMS.ANCHOR_GRASS_EXIT_THIRST  ||
+        this.hunger  < PARAMS.ANCHOR_GRASS_EXIT_HUNGER  ||
+        this.fatigue < PARAMS.ANCHOR_GRASS_EXIT_FATIGUE ||
+        H > PARAMS.H_ANCHOR_THRESHOLD
+      ) {
+        this.releaseFromPatch(g, PARAMS.COOLDOWN_ANCHOR);
       }
       return;
     }
 
     if (this.anchorType === 'water') {
-      const w = this.anchorTarget;
-      const d = p5.Vector.dist(this.pos, w.pos);
+      const w       = this.anchorTarget;
+      const d       = p5.Vector.dist(this.pos, w.pos);
       const overlap = max(0, 1 - d / (w.radius * 0.95));
-      const calmness = 1 - this.fear;
-      const intake = overlap * calmness;
+      const intake  = overlap * (1 - this.fear);
 
-      this.intakeWater = intake * w.hydration * w.available * 0.015;
-      this.restFlux = intake * w.stopEase * 0.004;
+      this.intakeWater = intake * w.hydration * w.available * PARAMS.INTAKE_WATER_ANCHORED;
+      this.restFlux    = intake * w.stopEase  * PARAMS.RESTFLUX_WATER_ANCHORED;
 
-      const drank = w.drink(min(this.intakeWater, 0.015));
-      this.thirst = max(0, this.thirst - drank * 1.3);
+      const drank = w.drink(min(this.intakeWater, PARAMS.INTAKE_WATER_ANCHORED));
+      this.thirst  = max(0, this.thirst - drank * PARAMS.THIRST_PER_WATER);
+      this.H_vec.thirst = max(0, this.H_vec.thirst - drank * PARAMS.H_DRINK_COOL);
       this.fatigue = max(0, this.fatigue - this.restFlux);
-      // アンカー中はHを減衰させない
 
-      if (this.fear > 0.42 || w.available < 0.07 || this.thirst < 0.22 || this.H > 1.2) {
-        this.releaseFromPatch(w, 70);
+      if (
+        this.fear > PARAMS.FEAR_ANCHOR_BREAK ||
+        w.available < 0.07 ||
+        this.thirst < PARAMS.ANCHOR_WATER_EXIT_THIRST ||
+        H > PARAMS.H_ANCHOR_THRESHOLD
+      ) {
+        this.releaseFromPatch(w, PARAMS.COOLDOWN_ANCHOR);
       }
       return;
     }
@@ -657,17 +865,27 @@ class Rabbit {
     const away = p5.Vector.sub(this.pos, patch.pos);
     if (away.mag() < 0.001) away.set(random(-1, 1), random(-1, 1));
     away.normalize();
-    this.vel = away.copy().mult(1.8);
-    this.H *= 0.35;
-    wrapPosition(this.pos);
+    this.vel = away.copy().mult(PARAMS.RELEASE_VEL);
+    this._scaleH(PARAMS.H_JUMP_RESIDUAL); // H → ρH（各成分に一様適用）
     this.clearAnchor(cooldown);
   }
 
   clearAnchor(cooldown) {
-    this.isAnchored = false;
-    this.anchorType = null;
-    this.anchorTarget = null;
+    this.isAnchored    = false;
+    this.anchorType    = null;
+    this.anchorTarget  = null;
     this.anchorCooldown = cooldown;
+  }
+
+  // H_vec の支配成分→表示色
+  _H_ringColor(alpha) {
+    const v = this.H_vec;
+    const dom = max(v.hunger, v.thirst, v.fatigue, v.fear);
+    if (dom < 0.05)           return color(100, 220, 255, alpha); // 低H：水色
+    if (dom === v.hunger)     return color(220, 185,  70, alpha); // 空腹熱：黄
+    if (dom === v.thirst)     return color( 80, 150, 255, alpha); // 口渇熱：青
+    if (dom === v.fatigue)    return color(160, 100, 220, alpha); // 疲労熱：紫
+    /* fear */                return color(255,  80,  80, alpha); // 恐怖熱：赤
   }
 
   show() {
@@ -681,17 +899,19 @@ class Rabbit {
       return;
     }
 
-    drawVector(this.pos, this.lastForces.food, color(80, 220, 120), 180);
-    drawVector(this.pos, this.lastForces.water, color(160, 120, 255), 180);
-    drawVector(this.pos, this.lastForces.cover, color(80, 220, 255), 180);
-    drawVector(this.pos, this.lastForces.danger, color(255, 80, 80), 230);
+    drawVector(this.pos, this.lastForces.food,   color(80,  220, 120), 180);
+    drawVector(this.pos, this.lastForces.water,  color(160, 120, 255), 180);
+    drawVector(this.pos, this.lastForces.cover,  color(80,  220, 255), 180);
+    drawVector(this.pos, this.lastForces.danger, color(255, 80,  80),  230);
 
     push();
     translate(this.pos.x, this.pos.y);
 
+    const H     = this.getH();
+    const alpha = map(H, 0, 3, 20, 150, true);
     noFill();
-    stroke(100, 220, 255, map(this.H, 0, 3, 20, 150, true));
-    circle(0, 0, 12 + this.H * 10);
+    stroke(this._H_ringColor(alpha));
+    circle(0, 0, 12 + H * 10);
 
     if (this.isAnchored) {
       stroke(255, 255, 180, 160);
@@ -706,20 +926,18 @@ class Rabbit {
     ellipse(0, 0, 18, 12);
     ellipse(-7, -5, 5, 12);
     ellipse(-1, -6, 5, 12);
-
     pop();
   }
 }
 
+// ===== ユーティリティ =====
 function distancePointToSegment(p, a, b) {
   const ab = p5.Vector.sub(b, a);
   const ap = p5.Vector.sub(p, a);
   const abLenSq = ab.magSq();
   if (abLenSq === 0) return p5.Vector.dist(p, a);
-  let t = ap.dot(ab) / abLenSq;
-  t = constrain(t, 0, 1);
-  const proj = p5.Vector.add(a, p5.Vector.mult(ab, t));
-  return p5.Vector.dist(p, proj);
+  const t = constrain(ap.dot(ab) / abLenSq, 0, 1);
+  return p5.Vector.dist(p, p5.Vector.add(a, p5.Vector.mult(ab, t)));
 }
 
 function drawVector(origin, vec, col, scale = 220) {
@@ -730,8 +948,8 @@ function drawVector(origin, vec, col, scale = 220) {
 }
 
 function wrapPosition(pos) {
-  if (pos.x < 0) pos.x = width;
-  if (pos.x > width) pos.x = 0;
-  if (pos.y < 0) pos.y = height;
+  if (pos.x < 0)      pos.x = width;
+  if (pos.x > width)  pos.x = 0;
+  if (pos.y < 0)      pos.y = height;
   if (pos.y > height) pos.y = 0;
 }
