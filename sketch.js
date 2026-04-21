@@ -446,10 +446,9 @@ class ActiveThreat {
     }
 
     this.vel.add(this.acc);
-    this.vel.limit(
-      this.mode === 'chase'  ? PARAMS.HUNTER_CHASE_SPEED  :
-      this.mode === 'search' ? PARAMS.HUNTER_SEARCH_SPEED : PARAMS.HUNTER_WANDER_SPEED
-    );
+    const maxSpeed = this.mode === 'chase'  ? PARAMS.HUNTER_CHASE_SPEED  :
+                     this.mode === 'search' ? PARAMS.HUNTER_SEARCH_SPEED : PARAMS.HUNTER_WANDER_SPEED;
+    this.vel.limit(maxSpeed);
     this.pos.add(this.vel);
     wrapPosition(this.pos);
 
@@ -569,7 +568,8 @@ class Rabbit {
     if (this.isAnchored) {
       this.senseDangerOnly(hunter);
       this.applyAnchoredFlows();
-      if (this.fear > PARAMS.FEAR_ANCHOR_BREAK) this.clearAnchor(PARAMS.COOLDOWN_FEAR_BREAK);
+      const quickBreak = lerp(PARAMS.FEAR_ANCHOR_BREAK, 0.92, this.naLevel);
+      if (this.fear > quickBreak) this.clearAnchor(PARAMS.COOLDOWN_FEAR_BREAK);
       return;
     }
 
@@ -908,8 +908,10 @@ class Rabbit {
       this.H_vec.hunger = max(0, this.H_vec.hunger - eaten * PARAMS.H_EAT_COOL);
       this.fatigue  = max(0, this.fatigue - this.restFlux);
 
+      // NAモード中は「怖いから留まる」に反転：fear退場閾値を引き上げる
+      const fearBreakG = lerp(PARAMS.FEAR_ANCHOR_BREAK, 0.92, this.naLevel);
       if (
-        this.fear > PARAMS.FEAR_ANCHOR_BREAK ||
+        this.fear > fearBreakG ||
         g.nutrition < 0.08 ||
         this.thirst  > PARAMS.ANCHOR_GRASS_EXIT_THIRST  ||
         this.hunger  < PARAMS.ANCHOR_GRASS_EXIT_HUNGER  ||
@@ -935,8 +937,9 @@ class Rabbit {
       this.H_vec.thirst = max(0, this.H_vec.thirst - drank * PARAMS.H_DRINK_COOL);
       this.fatigue = max(0, this.fatigue - this.restFlux);
 
+      const fearBreakW = lerp(PARAMS.FEAR_ANCHOR_BREAK, 0.92, this.naLevel);
       if (
-        this.fear > PARAMS.FEAR_ANCHOR_BREAK ||
+        this.fear > fearBreakW ||
         w.available < 0.07 ||
         this.thirst < PARAMS.ANCHOR_WATER_EXIT_THIRST ||
         H > PARAMS.H_ANCHOR_THRESHOLD
