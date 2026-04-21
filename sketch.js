@@ -153,6 +153,31 @@ const PARAMS = {
   FATIGUE_BIAS: 0.62,
   HUNGER_BIAS:  0.62,
 
+  // ノルアドレナリンスイッチ（素流圧ラベル再編）
+  // fear がこの範囲を通過すると平時→非常時モードへ smooth に切替
+  DANGER_MODE_LOW:      0.12,   // 以下 = 平時モード（旧0.30→下げた）
+  DANGER_MODE_HIGH:     0.45,   // 以上 = 非常時モード（旧0.65→下げた）
+
+  // naLevel の非対称ダイナミクス
+  // 上昇は速く（危険検知は即座）、減衰は遅く（余韻が長い）
+  NA_RISE_RATE:  0.18,   // dangerMode に向けて上昇する速さ
+  NA_DECAY_RATE: 0.004,  // dangerMode が下がった後に減衰する速さ
+
+  // 非常時モードでの食料・飲水圧の抑制率（平時=1.0）
+  FOOD_DANGER_SUPPRESS:  0.08,  // 「草＝遮蔽」になるので食料引力ほぼ消える
+  WATER_DANGER_SUPPRESS: 0.12,  // 「水辺＝逃走制限」になるので飲水引力消える
+
+  // 危険時：草＝遮蔽候補（nutrition無関係でcoverを参照）
+  COVER_DANGER_SCALE:    2.8,
+
+  // 危険時：水辺＝移動制限リスク（反発圧）
+  WATER_RISK_SCALE:      0.9,
+
+  // 危険時：開放地露出リスク
+  // 最寄り草までの距離がこれ以上→「開放地」と判定して遮蔽へ引力
+  OPEN_RISK_THRESHOLD:   80,
+  OPEN_RISK_SCALE:       1.4,
+
   // 資源枯渇→転移の閾値
   // アンカー退場条件(grass:0.08, water:0.07)より小さく設定
   // → anchored rabbit が転移に巻き込まれない
@@ -473,6 +498,10 @@ class Rabbit {
     this.fatigue = random(0.08, 0.16);
     this.fear    = random(0.04, 0.1);
 
+    // naLevel：ノルアドレナリンレベル（fear より遅く減衰する）
+    // 上昇速: NA_RISE_RATE / 減衰遅: NA_DECAY_RATE
+    this.naLevel = 0;
+
     this.noiseScale  = PARAMS.NOISE_BASE;
     this.intakeFood  = 0;
     this.intakeWater = 0;
@@ -517,6 +546,7 @@ class Rabbit {
     if (!this.alive) return 'dead';
     if (this.isAnchored && this.anchorType === 'grass')  return 'anchored-grass';
     if (this.isAnchored && this.anchorType === 'water')  return 'anchored-water';
+    if (this.naLevel    > 0.85)              return 'NA-switch';
     if (this.fear    > PARAMS.FEAR_BIAS)    return 'escape-bias';
     if (this.thirst  > PARAMS.THIRST_BIAS)  return 'water-bias';
     if (this.fatigue > PARAMS.FATIGUE_BIAS) return 'rest-bias';
@@ -591,6 +621,18 @@ class Rabbit {
     this.hunger = constrain(this.hunger + PARAMS.HUNGER_RATE, 0, 1);
     this.thirst = constrain(this.thirst + PARAMS.THIRST_RATE, 0, 1);
     this.fear  *= PARAMS.FEAR_DECAY;
+
+    // naLevel：fear から求めた目標値に非対称レートで追従
+    // 上昇は速く（NA_RISE_RATE）、減衰は遅い（NA_DECAY_RATE）
+    const naTarget = constrain(
+      map(this.fear, PARAMS.DANGER_MODE_LOW, PARAMS.DANGER_MODE_HIGH, 0, 1),
+      0, 1
+    );
+    if (naTarget > this.naLevel) {
+      this.naLevel = lerp(this.naLevel, naTarget, PARAMS.NA_RISE_RATE);
+    } else {
+      this.naLevel = lerp(this.naLevel, naTarget, PARAMS.NA_DECAY_RATE);
+    }
 
     // 過剰ニーズ → 対応する H_vec 成分に二乗蓄積
     const thirstEx  = max(0, this.thirst  - PARAMS.THIRST_EXCESS_START);
@@ -695,6 +737,50 @@ class Rabbit {
     if (this.pos.x > width  - PARAMS.WALL_MARGIN)  F_cost.add(createVector(-PARAMS.WALL_FORCE,  0));
     if (this.pos.y < PARAMS.WALL_MARGIN)           F_cost.add(createVector( 0,  PARAMS.WALL_FORCE));
     if (this.pos.y > height - PARAMS.WALL_MARGIN)  F_cost.add(createVector( 0, -PARAMS.WALL_FORCE));
+
+    // ── ノルアドレナリンスイッチ：素流圧ラベル再編 ──────────────────
+    // this.naLevel を使用（fear より遅く減衰する）
+    const dangerMode = this.naLevel;
+
+    if (dangerMode > 0) {
+      // [1] 食料圧・飲水圧を抑制
+      //     「草＝遮蔽候補」「水辺＝逃走制限」へ意味が反転するため
+      F_food.mult(lerp(1.0, PARAMS.FOOD_DANGER_SUPPRESS,  dangerMode));
+      F_water.mult(lerp(1.0, PARAMS.WATER_DANGER_SUPPRESS, dangerMode));
+
+      // [2] 草→遮蔽候補：nutritionではなくcoverを参照して引力を再付与
+      for (const g of grassPatches) {
+        const to   = p5.Vector.sub(g.pos, this.pos);
+        const dRaw = to.mag();
+        const dEff = max(dRaw, g.radius * 0.7);
+        if (dRaw < PARAMS.COVER_GRASS_RANGE) {
+          const shelterPull = dangerMode * PARAMS.COVER_DANGER_SCALE * g.cover / dEff;
+          F_cover.add(p5.Vector.mult(to.copy().normalize(), shelterPull));
+        }
+      }
+
+      // [3] 水辺→移動制限リスク：近距離の水辺から反発圧を付与
+      for (const w of waterSources) {
+        const to   = p5.Vector.sub(w.pos, this.pos);
+        const dRaw = to.mag();
+        if (dRaw < w.radius * 3.5) {
+          const riskPush = dangerMode * PARAMS.WATER_RISK_SCALE / max(dRaw, w.radius);
+          F_cost.add(p5.Vector.mult(to.copy().normalize().mult(-1), riskPush));
+        }
+      }
+
+      // [4] 開放地露出リスク：最寄り草が遠ければ遮蔽へ引力を強化
+      let nearDist = Infinity, nearDir = null;
+      for (const g of grassPatches) {
+        const d = p5.Vector.dist(this.pos, g.pos);
+        if (d < nearDist) { nearDist = d; nearDir = p5.Vector.sub(g.pos, this.pos).normalize(); }
+      }
+      if (nearDir && nearDist > PARAMS.OPEN_RISK_THRESHOLD) {
+        const exposure = map(nearDist, PARAMS.OPEN_RISK_THRESHOLD, 350, 0, 1, true);
+        F_cover.add(p5.Vector.mult(nearDir, dangerMode * PARAMS.OPEN_RISK_SCALE * exposure));
+      }
+    }
+    // ────────────────────────────────────────────────────────────────
 
     return { food: F_food, water: F_water, cover: F_cover, danger: F_danger, cost: F_cost };
   }
@@ -920,7 +1006,10 @@ class Rabbit {
     }
 
     noStroke();
-    const body = lerpColor(color(210, 220, 235), color(255, 180, 140), this.fear);
+    const calmColor = color(210, 220, 235);
+    const fearColor = color(255, 180, 140);
+    const naColor   = color(255, 235, 80);  // NA-switch：黄色（高覚醒）
+    const body = lerpColor(lerpColor(calmColor, fearColor, this.fear), naColor, this.naLevel);
     fill(body);
     rotate(this.vel.heading());
     ellipse(0, 0, 18, 12);
