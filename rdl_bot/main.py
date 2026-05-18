@@ -18,8 +18,15 @@ RDL個人M_B外部化AI - CLI ループ (Phase 0 + Phase A)
 import sys
 import os
 
+# Windows での文字化け防止
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stdin.reconfigure(encoding="utf-8")
+
 # カレントディレクトリを data/ の親に合わせる
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
+import json
 
 from node_graph import NodeGraph, Node
 from h_state import HState
@@ -27,12 +34,12 @@ from llm_bridge import LLMBridge
 
 
 BANNER = """
-╔══════════════════════════════════════╗
-║   棲みつくAI  /  RDL Bot  v0.1      ║
-║   Phase 0→A  CLI プロトタイプ        ║
-╚══════════════════════════════════════╝
+========================================
+  sumitsuku-AI  /  RDL Bot  v0.1
+  Phase 0->A  CLI prototype
+========================================
   /llm on|off|once  /h  /graph  /hot  /quit
-  フィードバック: y（同意）n（否定）?（言い換え）
+  feedback: y(agree) n(deny) ?(rephrase)
 """
 
 
@@ -147,6 +154,26 @@ def respond(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge) -> tup
         return f"[未知の入力です。H={h.summary()}]", "__none__"
 
 
+def load_seed_json(graph: NodeGraph, path: str = "data/seed_v0.1.json") -> int:
+    """グラフが空のとき手動 seed JSON を読み込む。追加数を返す。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            items = json.load(f)
+        for d in items:
+            graph.add(Node(
+                inputs=d.get("inputs", []),
+                rdl_type=d.get("rdl_type", "未分類"),
+                spatial_tag=d.get("spatial_tag", "概念"),
+                response=d.get("response"),
+                source="manual",
+                confidence=0.9,
+            ))
+        graph.save()
+        return len(items)
+    except FileNotFoundError:
+        return 0
+
+
 def phase0_seed(graph: NodeGraph, llm: LLMBridge):
     """Phase 0: LLMで普遍ノードを種まきする。"""
     if not llm.available():
@@ -176,6 +203,12 @@ def main():
 
     if seed_mode:
         phase0_seed(graph, llm)
+
+    # グラフが空なら手動 seed を自動ロード
+    if graph.stats()["total"] == 0:
+        n = load_seed_json(graph)
+        if n:
+            print(f"  seed_v0.1.json から {n} ノードをロードしました。")
 
     s = graph.stats()
     print(f"  グラフ読込: {s['total']} ノード  LLM: {llm.mode} ({llm.model})")
