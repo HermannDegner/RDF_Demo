@@ -43,9 +43,8 @@ BANNER = """
 """
 
 
-def feedback_prompt(last_node_id: str, h: HState) -> None:
-    """応答後のフィードバックを求める。"""
-    fb = input("  [fb] > ").strip().lower()
+def apply_feedback(fb: str, last_node_id: str, h: HState) -> None:
+    fb = fb.strip().lower()
     if fb == "n":
         h.on_deny(last_node_id)
         print("  → 否定を記録しました (H_post +1.0)")
@@ -54,10 +53,14 @@ def feedback_prompt(last_node_id: str, h: HState) -> None:
         print("  → 言い換えを記録しました (H_post +0.3)")
     elif fb == "y":
         h.on_agree(last_node_id)
-        print("  → 同意を記録しました (H_post ×0.7)")
-    # 空エンターは沈黙扱い
-    elif fb == "":
-        h.on_silence(last_node_id)
+        print("  → 同意を記録しました (H_post x0.7)")
+    # 空Enterは H を上げない
+
+
+def feedback_prompt(last_node_id: str, h: HState) -> None:
+    """応答後のフィードバックを求める。"""
+    fb = input("  [fb] > ")
+    apply_feedback(fb, last_node_id, h)
 
 
 def handle_command(cmd: str, llm: LLMBridge, graph: NodeGraph, h: HState) -> bool:
@@ -234,7 +237,7 @@ def main():
 
         # フィードバックショートカット（直前応答への反応）
         if user_input in ("y", "n", "?") and last_node_id != "__none__":
-            feedback_prompt(last_node_id, h)
+            apply_feedback(user_input, last_node_id, h)
             continue
 
         response, last_node_id = respond(user_input, graph, h, llm)

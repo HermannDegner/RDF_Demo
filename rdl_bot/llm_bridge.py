@@ -105,7 +105,9 @@ JSON形式で返してください（他のテキスト不要）。
             if self.mode == "on-once":
                 self.mode = "off"
             return node
-        except Exception:
+        except Exception as e:
+            print(f"[LLM JSON parse failed] {e}")
+            print(raw)
             return None
 
     def seed_universal_nodes(self) -> list[Node]:
@@ -150,5 +152,7 @@ JSON配列で返してください（他のテキスト不要）。
                     ttl=500,
                 ))
             return nodes
-        except Exception:
+        except Exception as e:
+            print(f"[LLM seed parse failed] {e}")
+            print(raw)
             return []

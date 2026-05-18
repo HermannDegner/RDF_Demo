@@ -29,6 +29,7 @@ class Node:
         self.confidence = confidence         # 0.0〜1.0
         self.ttl = ttl                       # 残存ステップ数
         self.phase = "M_lat"                 # M_lat → M_act
+        self.status = "candidate"            # candidate / active / quarantined / deprecated
         self.source = source                 # manual / llm_seed / llm_learned / graph_composed
         self.relations: list[str] = []       # 関連ノードID（W_ij）
         self.activation_count = 0            # 安定化カウント
@@ -38,9 +39,10 @@ class Node:
     def touch(self):
         self.last_used = datetime.now().isoformat()
         self.activation_count += 1
-        # N=3 で M_act 昇格（最初は低め、運用で調整）
-        if self.activation_count >= 3 and self.phase == "M_lat":
+        if self.activation_count >= 3:
             self.phase = "M_act"
+            if self.status == "candidate":
+                self.status = "active"
 
     def decay_confidence(self, rate: float = 0.995):
         self.confidence *= rate
@@ -105,11 +107,14 @@ class NodeGraph:
     def stats(self) -> dict:
         total = len(self.nodes)
         by_source = {}
-        by_phase = {"M_lat": 0, "M_act": 0}
+        by_phase = {}
+        by_status = {}
         for n in self.nodes.values():
             by_source[n.source] = by_source.get(n.source, 0) + 1
             by_phase[n.phase] = by_phase.get(n.phase, 0) + 1
-        return {"total": total, "by_source": by_source, "by_phase": by_phase}
+            s = getattr(n, "status", "candidate")
+            by_status[s] = by_status.get(s, 0) + 1
+        return {"total": total, "by_source": by_source, "by_phase": by_phase, "by_status": by_status}
 
     def save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)

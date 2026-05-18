@@ -45,15 +45,20 @@ class HState:
         self._mul_post(node_id, 0.7, "agree")
 
     def on_silence(self, node_id: str):
-        self._add_post(node_id, 0.5, "silence")
+        self._add_post(node_id, 0.2, "silence")
 
     # --- leap 判定 ---
 
     def should_leap(self) -> tuple[bool, str]:
-        if not self.H_post:
+        merged = {}
+        for nid, v in self.H_pre.items():
+            merged[nid] = merged.get(nid, 0) + v * 0.4
+        for nid, v in self.H_post.items():
+            merged[nid] = merged.get(nid, 0) + v
+        if not merged:
             return False, ""
-        max_id = max(self.H_post, key=lambda k: self.H_post[k])
-        if self.H_post[max_id] > self.theta:
+        max_id = max(merged, key=lambda k: merged[k])
+        if merged[max_id] > self.theta:
             return True, max_id
         return False, ""
 
