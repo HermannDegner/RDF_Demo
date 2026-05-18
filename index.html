@@ -1,18 +1,69 @@
 <!DOCTYPE html>
-<html lang="en">
-  <head>
-    <script src="https://cdn.jsdelivr.net/npm/p5@1.11.13/lib/p5.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/p5@1.11.13/lib/addons/p5.sound.min.js"></script>
-    
-    
-    
-    <link rel="stylesheet" type="text/css" href="style.css">
-    <meta charset="utf-8" />
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RDL Demos</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      padding: 40px 20px;
+    }
+    h1 {
+      text-align: center;
+      font-size: 2rem;
+      margin-bottom: 40px;
+      color: #e0aaff;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 20px;
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    a.card {
+      display: block;
+      background: #16213e;
+      border: 1px solid #e0aaff44;
+      border-radius: 10px;
+      padding: 24px 20px;
+      text-decoration: none;
+      color: #eee;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    a.card:hover {
+      background: #0f3460;
+      border-color: #e0aaff;
+    }
+    a.card .title {
+      font-size: 1.1rem;
+      font-weight: bold;
+      margin-bottom: 8px;
+      color: #c77dff;
+    }
+    a.card .desc {
+      font-size: 0.85rem;
+      color: #aaa;
+    }
+  </style>
+</head>
+<body>
+  <h1>RDL Demos</h1>
+  <div class="grid">
+    <a class="card" href="./demo0/">
+      <div class="title">Demo 0</div>
+      <div class="desc">p5.js sketch</div>
+    </a>
+    <a class="card" href="./demo1/">
+      <div class="title">Demo 1</div>
+      <div class="desc">RDF v4 近傍セル評価移動</div>
+    </a>
+  </div>
 
-  </head>
-  <body>
-    <main>
-    </main>
-    <script src="sketch.js"></script>
-  </body>
+</body>
 </html>
