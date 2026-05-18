@@ -67,31 +67,31 @@ class NodeGraph:
     def add(self, node: Node):
         self.nodes[node.id] = node
 
-    def search(self, text: str) -> tuple[Optional[Node], str]:
+    def search(self, text: str) -> tuple[Optional[Node], str, Optional[Node]]:
         """
         入力テキストにマッチするノードを返す。
-        返り値: (node, match_type)
-        match_type: "exact" / "partial" / "miss"
+        返り値: (node, match_type, nearest)
+          - match_type: "exact" / "partial" / "miss"
+          - nearest: ミス時でも最近傍ノード（on_miss のコンテキスト用）
         """
         text_lower = text.lower()
         best_node = None
         best_score = 0.0
-        match_type = "miss"
 
         for node in self.nodes.values():
             for pattern in node.input:
                 if pattern.lower() == text_lower:
-                    return node, "exact"
+                    return node, "exact", node
                 if pattern.lower() in text_lower or text_lower in pattern.lower():
                     score = len(pattern) / max(len(text), 1)
                     if score > best_score:
                         best_score = score
                         best_node = node
-                        match_type = "partial"
 
         if best_score < 0.3:
-            return None, "miss"
-        return best_node, match_type
+            # ミスでも nearest は返す（H_pre のコンテキストに使う）
+            return None, "miss", best_node
+        return best_node, "partial", best_node
 
     def get_by_id(self, node_id: str) -> Optional[Node]:
         return self.nodes.get(node_id)

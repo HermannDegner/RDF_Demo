@@ -49,10 +49,13 @@ class HState:
 
     # --- leap 判定 ---
 
+    # H_pre / H_post の合成比率。H_pre は軽め（入力ミス）、H_post は重め（ユーザー反応）。
+    H_PRE_WEIGHT = 0.4
+
     def should_leap(self) -> tuple[bool, str]:
         merged = {}
         for nid, v in self.H_pre.items():
-            merged[nid] = merged.get(nid, 0) + v * 0.4
+            merged[nid] = merged.get(nid, 0) + v * self.H_PRE_WEIGHT
         for nid, v in self.H_post.items():
             merged[nid] = merged.get(nid, 0) + v
         if not merged:
@@ -76,7 +79,7 @@ class HState:
     def hot_nodes(self, top: int = 3) -> list[tuple[str, float]]:
         merged = {}
         for nid, v in self.H_pre.items():
-            merged[nid] = merged.get(nid, 0) + v * 0.4
+            merged[nid] = merged.get(nid, 0) + v * self.H_PRE_WEIGHT
         for nid, v in self.H_post.items():
             merged[nid] = merged.get(nid, 0) + v
         return sorted(merged.items(), key=lambda x: x[1], reverse=True)[:top]

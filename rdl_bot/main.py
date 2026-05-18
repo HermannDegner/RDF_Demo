@@ -109,12 +109,47 @@ def handle_command(cmd: str, llm: LLMBridge, graph: NodeGraph, h: HState) -> boo
     return True
 
 
+_turn_count = 0
+
+
+def metabolize(graph: NodeGraph, retire: bool = False):
+    """M_Δ相: 全ノードを減衰する。retire=True のとき死滅ノードも退場。"""
+    for n in list(graph.nodes.values()):
+        n.decay_confidence()
+    if retire:
+        graph.retire_dead_nodes()
+
+
+def compose_from_graph(user_input: str, graph: NodeGraph) -> tuple[str, str]:
+    """
+    LLM:off 時の暫定グラフ内合成。
+    最も入力長比率が高い部分一致ノードの response を借りる。
+    """
+    text_lower = user_input.lower()
+    best_node = None
+    best_score = 0.0
+
+    for node in graph.nodes.values():
+        for pattern in node.input:
+            if pattern.lower() in text_lower or text_lower in pattern.lower():
+                score = len(pattern) / max(len(text_lower), 1) * node.confidence
+                if score > best_score:
+                    best_score = score
+                    best_node = node
+
+    if best_node and best_score > 0.1:
+        resp = best_node.response or f"[{best_node.rdl_type}（近傍合成）]"
+        return f"{resp}（※近傍合成）", best_node.id
+
+    return "[未知の入力です。/llm on で外部参照できます]", "__none__"
+
+
 def respond(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge) -> tuple[str, str]:
     """
     応答を生成して返す。
     返り値: (response_text, last_node_id)
     """
-    node, match_type = graph.search(user_input)
+    node, match_type, nearest = graph.search(user_input)
 
     if match_type == "exact":
         h.on_exact(node.id)
@@ -131,8 +166,9 @@ def respond(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge) -> tup
         return resp, node.id
 
     else:
-        # ミス
-        h.on_miss()
+        # ミス：最近傍ノードIDをコンテキストとして渡す
+        context_nid = nearest.id if nearest else "__none__"
+        h.on_miss(context_nid)
         leap_needed, hot_nid = h.should_leap()
 
         if leap_needed and llm.mode in ("on", "on-once"):
@@ -151,10 +187,9 @@ def respond(user_input: str, graph: NodeGraph, h: HState, llm: LLMBridge) -> tup
                     return raw, "__llm__"
 
         elif leap_needed:
-            print(f"  [H閾値超過 (θ={h.theta:.2f}) — LLMがoffです。/llm on で外部参照できます]")
+            print(f"  [H閾値超過 (θ={h.theta:.2f}) — グラフ内合成を試みます]")
 
-        # グラフ内合成 or 未知として返す
-        return f"[未知の入力です。H={h.summary()}]", "__none__"
+        return compose_from_graph(user_input, graph)
 
 
 def load_seed_json(graph: NodeGraph, path: str = "data/seed_v0.1.json") -> int:
@@ -245,6 +280,14 @@ def main():
 
         # 毎ターン簡易フィードバック
         feedback_prompt(last_node_id, h)
+
+        # M_Δ相: 代謝（毎ターン減衰、50ターンごとに死滅退場＋保存）
+        global _turn_count
+        _turn_count += 1
+        retire = (_turn_count % 50 == 0)
+        metabolize(graph, retire=retire)
+        if retire:
+            graph.save()
 
 
 if __name__ == "__main__":
